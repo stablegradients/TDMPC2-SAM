@@ -30,6 +30,10 @@ buffer_size: 1_000_000
 exp_name: default
 data_dir: ???
 
+# SAM optimization
+optimizer: Adam  # Options: Adam, SAM
+sam_rho: 0.05   # Sharpness-aware minimization rho parameter (only used when optimizer=SAM)
+
 # planning
 mpc: true
 iterations: 6

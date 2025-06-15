@@ -1,0 +1,10 @@
+- task=walker-stand
+- seed=42
+- rho=0.5
+- model_size=5
+- steps=1000000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=dmc_ablation
+- exp_name=walker-stand_seed42_rho0.5
+- enable_wandb=true

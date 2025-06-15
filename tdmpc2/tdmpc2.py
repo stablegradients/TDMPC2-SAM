@@ -5,6 +5,7 @@ from common import math
 from common.scale import RunningScale
 from common.world_model import WorldModel
 from common.layers import api_model_conversion
+from common.sam import SAM
 from tensordict import TensorDict
 
 
@@ -20,7 +21,8 @@ class TDMPC2(torch.nn.Module):
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
 		self.model = WorldModel(cfg).to(self.device)
-		self.optim = torch.optim.Adam([
+		# World model optimizer setup
+		world_model_params = [
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
 			{'params': self.model._reward.parameters()},
@@ -28,7 +30,15 @@ class TDMPC2(torch.nn.Module):
 			{'params': self.model._Qs.parameters()},
 			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []
 			 }
-		], lr=self.cfg.lr, capturable=True)
+		]
+		
+		# Use SAM optimizer if specified, otherwise use Adam
+		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
+			base_optimizer = torch.optim.Adam
+			self.optim = SAM(world_model_params, base_optimizer, lr=self.cfg.lr, rho=self.cfg.sam_rho, capturable=True)
+			print(f'Using SAM optimizer for world model with rho={self.cfg.sam_rho}')
+		else:
+			self.optim = torch.optim.Adam(world_model_params, lr=self.cfg.lr, capturable=True)
 		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
 		self.model.eval()
 		self.scale = RunningScale(cfg)
@@ -305,12 +315,69 @@ class TDMPC2(torch.nn.Module):
 		)
 
 		# Update model
-		total_loss.backward()
-		grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
-		self.optim.step()
-		self.optim.zero_grad(set_to_none=True)
+		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
+			# SAM two-step optimization
+			# First forward-backward pass
+			total_loss.backward()
+			grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+			self.optim.first_step(zero_grad=True)
+			
+			# Second forward-backward pass (need to recompute loss)
+			# Recompute targets at the perturbed weights ---------------------
+			with torch.no_grad():
+				next_z_second = self.model.encode(obs[1:], task)
+				td_targets_second = self._td_target(next_z_second, reward, terminated, task)
+			# ----------------------------------------------------------------
+			# Re-encode and recompute latent rollout
+			zs_second = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, self.cfg.latent_dim, device=self.device)
+			z_second = self.model.encode(obs[0], task)
+			zs_second[0] = z_second
+			consistency_loss_second = 0
+			for t, (_action, _next_z) in enumerate(zip(action.unbind(0), next_z_second.unbind(0))):
+				z_second = self.model.next(z_second, _action, task)
+				consistency_loss_second = consistency_loss_second + F.mse_loss(z_second, _next_z) * self.cfg.rho**t
+				zs_second[t+1] = z_second
+			
+			# Recompute predictions
+			_zs_second = zs_second[:-1]
+			qs_second = self.model.Q(_zs_second, action, task, return_type='all')
+			reward_preds_second = self.model.reward(_zs_second, action, task)
+			if self.cfg.episodic:
+				termination_pred_second = self.model.termination(zs_second[1:], task, unnormalized=True)
+			
+			# Recompute losses using td_targets_second -----------------------
+			reward_loss_second, value_loss_second = 0, 0
+			for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds_second.unbind(0), reward.unbind(0), td_targets_second.unbind(0), qs_second.unbind(1))):
+				reward_loss_second = reward_loss_second + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+				for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
+					value_loss_second = value_loss_second + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
+			
+			consistency_loss_second = consistency_loss_second / self.cfg.horizon
+			reward_loss_second = reward_loss_second / self.cfg.horizon
+			if self.cfg.episodic:
+				termination_loss_second = F.binary_cross_entropy_with_logits(termination_pred_second, terminated)
+			else:
+				termination_loss_second = 0.
+			value_loss_second = value_loss_second / (self.cfg.horizon * self.cfg.num_q)
+			total_loss_second = (
+				self.cfg.consistency_coef * consistency_loss_second +
+				self.cfg.reward_coef * reward_loss_second +
+				self.cfg.termination_coef * termination_loss_second +
+				self.cfg.value_coef * value_loss_second
+			)
+			
+			total_loss_second.backward()
+			# Clip gradients *after* the second backward pass ----------------
+			torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+			self.optim.second_step(zero_grad=True)
+		else:
+			# Standard Adam optimization
+			total_loss.backward()
+			grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+			self.optim.step()
+			self.optim.zero_grad(set_to_none=True)
 
-		# Update policy
+		# Update policy (always use original latent states, not the SAM second-pass states)
 		pi_info = self.update_pi(zs.detach(), task)
 
 		# Update target Q-functions
