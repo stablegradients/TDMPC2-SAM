@@ -323,17 +323,12 @@ class TDMPC2(torch.nn.Module):
 			self.optim.first_step(zero_grad=True)
 			
 			# Second forward-backward pass (need to recompute loss)
-			# Recompute targets at the perturbed weights ---------------------
-			with torch.no_grad():
-				next_z_second = self.model.encode(obs[1:], task)
-				td_targets_second = self._td_target(next_z_second, reward, terminated, task)
-			# ----------------------------------------------------------------
 			# Re-encode and recompute latent rollout
 			zs_second = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, self.cfg.latent_dim, device=self.device)
 			z_second = self.model.encode(obs[0], task)
 			zs_second[0] = z_second
 			consistency_loss_second = 0
-			for t, (_action, _next_z) in enumerate(zip(action.unbind(0), next_z_second.unbind(0))):
+			for t, (_action, _next_z) in enumerate(zip(action.unbind(0), next_z.unbind(0))):
 				z_second = self.model.next(z_second, _action, task)
 				consistency_loss_second = consistency_loss_second + F.mse_loss(z_second, _next_z) * self.cfg.rho**t
 				zs_second[t+1] = z_second
@@ -345,9 +340,9 @@ class TDMPC2(torch.nn.Module):
 			if self.cfg.episodic:
 				termination_pred_second = self.model.termination(zs_second[1:], task, unnormalized=True)
 			
-			# Recompute losses using td_targets_second -----------------------
+			# Recompute losses using original td_targets -------------------
 			reward_loss_second, value_loss_second = 0, 0
-			for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds_second.unbind(0), reward.unbind(0), td_targets_second.unbind(0), qs_second.unbind(1))):
+			for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds_second.unbind(0), reward.unbind(0), td_targets.unbind(0), qs_second.unbind(1))):
 				reward_loss_second = reward_loss_second + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
 				for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
 					value_loss_second = value_loss_second + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
