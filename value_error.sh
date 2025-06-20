@@ -18,7 +18,7 @@ RHO_VALUES=(
             # 0.000005
 
             #0.0000025
-            #0.000001
+            0.000001
             #0.0000005
             #0.00000025
             #0.0000001
@@ -118,14 +118,14 @@ run_experiment() {
     echo "🚀 Starting: $env, seed=$seed, rho=$rho, GPU=$gpu_id"
     
     # Create experiment name for grouping
-    exp_name="${env}_rho${rho}_value_error_ensemble_avg"
+    exp_name="${env}_rho${rho}_SAM_ensemble_avg"
     
     # Run the experiment with GPU isolation
     CUDA_VISIBLE_DEVICES=$gpu_id python tdmpc2/train.py \
         task=$env \
         seed=$seed \
         sam_rho=$rho \
-        optimizer=Adam \
+        optimizer=SAM \
         model_size=$MODEL_SIZE \
         steps=$STEPS \
         obs=$OBS_TYPE \
