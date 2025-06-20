@@ -232,10 +232,10 @@ class Logger:
 			for k, v in d.items():
 				_d[category + "/" + k] = v
 			self._wandb.log(_d, step=d[xkey])
-		if category == "eval" and self._save_csv:
-			keys = ["step", "episode_reward"]
-			self._eval.append(np.array([d[keys[0]], d[keys[1]]]))
-			pd.DataFrame(np.array(self._eval)).to_csv(
-				self._log_dir / "eval.csv", header=keys, index=None
-			)
+		# if category == "eval" and self._save_csv:
+		# 	keys = ["step", "episode_reward"]
+		# 	self._eval.append(np.array([d[keys[0]], d[keys[1]]]))
+		# 	pd.DataFrame(np.array(self._eval)).to_csv(
+		# 		self._log_dir / "eval.csv", header=keys, index=None
+		# 	)
 		self._print(d, category)

@@ -14,6 +14,10 @@ __pycache__/
 
 # C extensions
 *.so
+logs/
+results/
+outputs/
+wandb/
 
 # Distribution / packaging
 .Python
@@ -127,3 +131,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+
+/zfsauton2/home/shrinivr/tdmpc2/outputs
+/zfsauton2/home/shrinivr/tdmpc2/logs
+/zfsauton2/home/shrinivr/tdmpc2/results
