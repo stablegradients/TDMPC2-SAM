@@ -28,32 +28,15 @@ class TDMPC2(torch.nn.Module):
 		# 2. Supervisory heads (Q-funcs, reward) which need sharp Adam updates.
 		
 		# Parameters for the predictive model (encoder + dynamics)
-		predictive_model_params = [
-			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr * self.cfg.enc_lr_scale},
+		self.optim = torch.optim.Adam([
+			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
-			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
-		]
-
-		# Parameters for the supervisory heads (Q-functions, reward, termination)
-		head_params = [
 			{'params': self.model._reward.parameters()},
 			{'params': self.model._termination.parameters() if self.cfg.episodic else []},
-			{'params': self.model._Qs.parameters()}
-		]
-
-		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
-			print(f'Using SAM optimizer for predictive model (rho={self.cfg.sam_rho}) and Adam for heads.')
-			base_optimizer = torch.optim.Adam
-			# SAM for the predictive components
-			self.model_optim = SAM(predictive_model_params, base_optimizer, lr=self.cfg.lr, rho=self.cfg.sam_rho, capturable=True)
-			# Standard Adam for the heads
-			self.head_optim = torch.optim.Adam(head_params, lr=self.cfg.lr, capturable=True)
-		else:
-			print('Using Adam optimizer for all world model components.')
-			# If not using SAM, a single Adam optimizer for everything is fine.
-			world_model_params = predictive_model_params + head_params
-			self.model_optim = torch.optim.Adam(world_model_params, lr=self.cfg.lr, capturable=True)
-			self.head_optim = None # Not used
+			{'params': self.model._Qs.parameters()},
+			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []
+			 }
+		], lr=self.cfg.lr, capturable=True)
 
 		# Optimizer for the policy network remains separate
 		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
@@ -208,114 +191,77 @@ class TDMPC2(torch.nn.Module):
 		return reward + discount * (1-terminated) * self.model.Q(next_z, action, task, return_type='min', target=True)
 
 	def _update(self, obs, action, reward, terminated, task=None):
+		print("We are on the original implementation of TDMPC2")
+		# Compute targets
 		with torch.no_grad():
 			next_z = self.model.encode(obs[1:], task)
 			td_targets = self._td_target(next_z, reward, terminated, task)
 
+		# Prepare for update
 		self.model.train()
 
-		# --- (FIX) LOSS CALCULATION AND GRADIENT APPLICATION ---
-		# This section is now generalized for both Adam and selective SAM.
-		# For SAM, this logic is called twice.
-		def calculate_loss(zs, next_z_target):
-			# Predictions
-			_zs = zs[:-1]
-			qs = self.model.Q(_zs, action, task, return_type='all')
-			reward_preds = self.model.reward(_zs, action, task)
-			
-			# Latent consistency loss
-			consistency_loss = F.mse_loss(zs[1:], next_z_target, reduction='none').mean(dim=(1,2))
-			consistency_loss = (consistency_loss * (self.cfg.rho ** torch.arange(self.cfg.horizon, device=self.device))).mean()
-
-			# Value and reward losses
-			reward_loss, value_loss = 0, 0
-			for t, (rew_pred_t, rew_t, td_targets_t, qs_t) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
-				rho_t = self.cfg.rho ** t
-				reward_loss += math.soft_ce(rew_pred_t, rew_t, self.cfg).mean() * rho_t
-				for q_t in qs_t.unbind(0):
-					value_loss += math.soft_ce(q_t, td_targets_t, self.cfg).mean() * rho_t
-			
-			# Termination loss
-			termination_loss = 0.
-			if self.cfg.episodic:
-				termination_pred = self.model.termination(zs[1:], task, unnormalized=True)
-				termination_loss = F.binary_cross_entropy_with_logits(termination_pred, terminated)
-			
-			value_loss /= self.cfg.num_q
-
-			# Combine losses
-			total_loss = (
-				self.cfg.consistency_coef * consistency_loss +
-				self.cfg.reward_coef * reward_loss +
-				self.cfg.termination_coef * termination_loss +
-				self.cfg.value_coef * value_loss
-			)
-			
-			# For logging purposes
-			all_losses = {
-				'consistency_loss': consistency_loss.detach(),
-				'reward_loss': reward_loss.detach() / self.cfg.horizon,
-				'value_loss': value_loss.detach() / self.cfg.horizon,
-				'termination_loss': termination_loss.detach() if self.cfg.episodic else 0.,
-				'total_loss': total_loss.detach()
-			}
-			return total_loss, all_losses
-
 		# Latent rollout
-		z = self.model.encode(obs[0], task)
 		zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, self.cfg.latent_dim, device=self.device)
+		z = self.model.encode(obs[0], task)
 		zs[0] = z
-		for t in range(self.cfg.horizon):
-			zs[t+1] = self.model.next(zs[t], action[t], task)
+		consistency_loss = 0
+		for t, (_action, _next_z) in enumerate(zip(action.unbind(0), next_z.unbind(0))):
+			z = self.model.next(z, _action, task)
+			consistency_loss = consistency_loss + F.mse_loss(z, _next_z) * self.cfg.rho**t
+			zs[t+1] = z
 
-		# Calculate loss and update
-		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
-			# First step of SAM on predictive model
-			total_loss, losses = calculate_loss(zs.clone(), next_z.detach())
-			total_loss.backward()
-			self.model_optim.first_step(zero_grad=True)
-			
-			# Update heads with standard Adam
-			# Grads are already present from the first backward, so just step.
-			torch.nn.utils.clip_grad_norm_(self.model._reward.parameters(), self.cfg.grad_clip_norm)
-			torch.nn.utils.clip_grad_norm_(self.model._Qs.parameters(), self.cfg.grad_clip_norm)
-			if self.cfg.episodic:
-				torch.nn.utils.clip_grad_norm_(self.model._termination.parameters(), self.cfg.grad_clip_norm)
-			self.head_optim.step()
-			self.head_optim.zero_grad(set_to_none=True)
+		# Predictions
+		_zs = zs[:-1]
+		qs = self.model.Q(_zs, action, task, return_type='all')
+		reward_preds = self.model.reward(_zs, action, task)
+		if self.cfg.episodic:
+			termination_pred = self.model.termination(zs[1:], task, unnormalized=True)
 
-			# Second step of SAM on predictive model
-			z_prime = self.model.encode(obs[0], task)
-			zs_prime = torch.empty_like(zs)
-			zs_prime[0] = z_prime
-			for t in range(self.cfg.horizon):
-				zs_prime[t+1] = self.model.next(zs_prime[t], action[t], task)
-			
-			total_loss_prime, _ = calculate_loss(zs_prime, next_z.detach())
-			total_loss_prime.backward()
-			grad_norm = torch.nn.utils.clip_grad_norm_(self.model._encoder.parameters(), self.cfg.grad_clip_norm)
-			grad_norm += torch.nn.utils.clip_grad_norm_(self.model._dynamics.parameters(), self.cfg.grad_clip_norm)
-			self.model_optim.second_step(zero_grad=True)
+		# Compute losses
+		reward_loss, value_loss = 0, 0
+		for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
+			reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+			for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
+				value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
 
-		else: # Standard Adam
-			total_loss, losses = calculate_loss(zs.clone(), next_z.detach())
-			total_loss.backward()
-			grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
-			self.model_optim.step()
-			self.model_optim.zero_grad(set_to_none=True)
+		consistency_loss = consistency_loss / self.cfg.horizon
+		reward_loss = reward_loss / self.cfg.horizon
+		if self.cfg.episodic:
+			termination_loss = F.binary_cross_entropy_with_logits(termination_pred, terminated)
+		else:
+			termination_loss = 0.
+		value_loss = value_loss / (self.cfg.horizon * self.cfg.num_q)
+		total_loss = (
+			self.cfg.consistency_coef * consistency_loss +
+			self.cfg.reward_coef * reward_loss +
+			self.cfg.termination_coef * termination_loss +
+			self.cfg.value_coef * value_loss
+		)
 
-		# Policy update
-		with torch.no_grad():
-			policy_zs = self.model.encode(obs[:self.cfg.horizon], task)
-		pi_info = self.update_pi(policy_zs.detach(), task)
+		# Update model
+		total_loss.backward()
+		grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+		self.optim.step()
+		self.optim.zero_grad(set_to_none=True)
+
+		# Update policy
+		pi_info = self.update_pi(zs.detach(), task)
 
 		# Update target Q-functions
 		self.model.soft_update_target_Q()
 
 		# Return training statistics
 		self.model.eval()
-		losses['grad_norm'] = grad_norm
-		info = TensorDict(losses)
+		info = TensorDict({
+			"consistency_loss": consistency_loss,
+			"reward_loss": reward_loss,
+			"value_loss": value_loss,
+			"termination_loss": termination_loss,
+			"total_loss": total_loss,
+			"grad_norm": grad_norm,
+		})
+		if self.cfg.episodic:
+			info.update(math.termination_statistics(torch.sigmoid(termination_pred[-1]), terminated[-1]))
 		info.update(pi_info)
 		return info.detach().mean()
 
