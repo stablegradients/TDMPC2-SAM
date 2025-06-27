@@ -8,6 +8,7 @@ from common.layers import api_model_conversion
 from common.sam import SAM
 from tensordict import TensorDict
 
+import numpy as np
 
 class TDMPC2(torch.nn.Module):
 	"""
@@ -273,3 +274,69 @@ class TDMPC2(torch.nn.Module):
 			kwargs["task"] = task
 		torch.compiler.cudagraph_mark_step_begin()
 		return self._update(obs, action, reward, terminated, **kwargs)
+
+	@torch.no_grad()
+	def get_value(self, obs, task=None, num_samples=256):
+		"""
+		Estimate the value of a given observation by averaging Q-values
+		over actions sampled from the policy. V(s) = E_{a ~ pi(s)} [Q(s, a)]
+		"""
+		# Save all RNG states
+		torch_rng_state = torch.get_rng_state()
+		cuda_rng_state = torch.cuda.get_rng_state()
+		numpy_rng_state = np.random.get_state()
+		
+		# If using random module
+		import random
+		python_rng_state = random.getstate()
+		
+		# Save model training state
+		model_training = self.model.training
+		
+		# Save CUDA deterministic settings
+		cuda_deterministic = torch.backends.cudnn.deterministic
+		cuda_benchmark = torch.backends.cudnn.benchmark
+		
+		try:
+			# Ensure model is in eval mode (disables dropout)
+			self.model.eval()
+			
+			# Force deterministic CUDA operations
+			torch.backends.cudnn.deterministic = True
+			torch.backends.cudnn.benchmark = False
+			
+			# Move observation to the correct device and add a batch dimension.
+			obs = obs.to(self.device, non_blocking=True).unsqueeze(0)
+			
+			# Encode the observation into the latent space.
+			z = self.model.encode(obs, task)
+
+			# Repeat the latent state to create a batch for sampling multiple actions.
+			z_repeated = z.repeat(num_samples, 1)
+
+			# Sample a batch of actions from the policy for the same latent state.
+			actions_from_pi, _ = self.model.pi(z_repeated, task)
+
+			# Evaluate the Q-function for the state and all sampled actions.
+			# Use the ensemble method specified in the config.
+			q_values = self.model.Q(z_repeated, actions_from_pi, task, return_type=self.cfg.eval_q_ensemble_method)
+
+			# The returned shape depends on the ensemble method, so we average correctly.
+			# 'all' returns (num_q, num_samples, 1), others return (num_samples, 1)
+			# We average over all dimensions to get a single scalar value.
+			value = q_values.mean()
+
+			return value
+		finally:
+			# Restore all states
+			torch.set_rng_state(torch_rng_state)
+			torch.cuda.set_rng_state(cuda_rng_state)
+			np.random.set_state(numpy_rng_state)
+			random.setstate(python_rng_state)
+			
+			# Restore model training state
+			self.model.train(model_training)
+			
+			# Restore CUDA settings
+			torch.backends.cudnn.deterministic = cuda_deterministic
+			torch.backends.cudnn.benchmark = cuda_benchmark

@@ -8,8 +8,10 @@ episodic: false
 
 # evaluation
 checkpoint: ???
-eval_episodes: 10
+eval_episodes: 1
 eval_freq: 50000
+eval_value: true
+eval_q_ensemble_method: 'avg'
 
 # training
 steps: 10_000_000

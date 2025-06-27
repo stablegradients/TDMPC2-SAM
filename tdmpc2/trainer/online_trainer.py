@@ -26,30 +26,86 @@ class OnlineTrainer(Trainer):
 		)
 
 	def eval(self):
-		"""Evaluate a TD-MPC2 agent."""
-		ep_rewards, ep_successes, ep_lengths = [], [], []
+		"""Evaluate a TD-MPC2 agent and log detailed value metrics."""
+		
+		# Lists to store metrics from each evaluation episode
+		all_ep_rewards, all_ep_successes, all_ep_lengths = [], [], []
+		all_estimated_values, all_true_discounted_returns, all_value_errors = [], [], []
+
 		for i in range(self.cfg.eval_episodes):
-			obs, done, ep_reward, t = self.env.reset(), False, 0, 0
+			obs, done, t = self.env.reset(), False, 0
+			ep_rewards = []
+			
 			if self.cfg.save_video:
-				self.logger.video.init(self.env, enabled=(i==0))
+				self.logger.video.init(self.env, enabled=(i == 0))
+
+			# 1. Estimate discounted value at s_0
+			estimated_value_s0 = 0.0
+			if self.cfg.get('eval_value', False):
+				estimated_value_s0 = self.agent.get_value(obs).item()
+
+			# Run the full episode
 			while not done:
 				torch.compiler.cudagraph_mark_step_begin()
-				action = self.agent.act(obs, t0=t==0, eval_mode=True)
+				action = self.agent.act(obs, t0=(t==0), eval_mode=True)
 				obs, reward, done, info = self.env.step(action)
-				ep_reward += reward
+				ep_rewards.append(reward.item())
 				t += 1
 				if self.cfg.save_video:
 					self.logger.video.record(self.env)
-			ep_rewards.append(ep_reward)
-			ep_successes.append(info['success'])
-			ep_lengths.append(t)
+			
+			# --- After episode is done, calculate and log metrics ---
+
+			# 2. Calculate the True Discounted Return
+			rewards_tensor = torch.tensor(ep_rewards, dtype=torch.float32)
+			discount_factors = self.agent.discount ** torch.arange(len(rewards_tensor))
+			true_discounted_return = (rewards_tensor * discount_factors).sum().item()
+
+			# 3. Calculate Value Prediction Error
+			value_prediction_error = abs(estimated_value_s0 - true_discounted_return)
+
+			# Store metrics for this episode
+			all_ep_rewards.append(np.sum(ep_rewards))
+			all_ep_successes.append(info['success'])
+			all_ep_lengths.append(t)
+			if self.cfg.get('eval_value', False):
+				all_estimated_values.append(estimated_value_s0)
+				all_true_discounted_returns.append(true_discounted_return)
+				all_value_errors.append(value_prediction_error)
+			
+			# 6. Log metrics for this specific episode to wandb
+			individual_metrics = {
+				'step': self._step,
+				f'episode_reward_ep{i}': np.sum(ep_rewards),
+				f'episode_length_ep{i}': t,
+			}
+			if self.cfg.get('eval_value', False):
+				individual_metrics[f'estimated_value_s0_ep{i}'] = estimated_value_s0
+				individual_metrics[f'true_discounted_return_ep{i}'] = true_discounted_return
+				individual_metrics[f'value_prediction_error_ep{i}'] = value_prediction_error
+			
+			if self.logger._wandb: # Only log if wandb is enabled
+				self.logger.log(individual_metrics, 'eval')
+
 			if self.cfg.save_video:
-				self.logger.video.save(self._step)
-		return dict(
-			episode_reward=np.nanmean(ep_rewards),
-			episode_success=np.nanmean(ep_successes),
-			episode_length= np.nanmean(ep_lengths),
+				self.logger.video.save(self._step, key=f'videos/eval_video_ep{i}')
+
+		# --- After all evaluation episodes are done, calculate and log summary statistics ---
+
+		summary_metrics = dict(
+			episode_reward=np.nanmean(all_ep_rewards),
+			episode_success=np.nanmean(all_ep_successes),
+			episode_length=np.nanmean(all_ep_lengths),
 		)
+		if self.cfg.get('eval_value', False):
+			summary_metrics.update(dict(
+				avg_estimated_value_s0=np.nanmean(all_estimated_values),
+				avg_true_discounted_return=np.nanmean(all_true_discounted_returns),
+				avg_value_prediction_error=np.nanmean(all_value_errors),
+				std_value_prediction_error=np.nanstd(all_value_errors),
+			))
+		
+		return summary_metrics
 
 	def to_td(self, obs, action=None, reward=None, terminated=None):
 		"""Creates a TensorDict for a new episode."""
