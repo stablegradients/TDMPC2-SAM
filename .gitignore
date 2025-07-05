@@ -1,6 +1,7 @@
 # Logging
 tdmpc2/logs/
 tdmpc2/outputs/
+outputs/
 tdmpc2/wandb/
 
 # HPC
