@@ -1,0 +1,8 @@
+- task=dog-walk
+- seed=42
+- steps=100000
+- exp_name=buffer_test
+- checkpoint_dir=./checkpoints_buffer
+- eval_freq=1000
+- wandb_project=tdmpc2_buffer_save
+- wandb_entity=stablegradients

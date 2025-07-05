@@ -1,0 +1,15 @@
+- task=humanoid-run
+- seed=42
+- sam_rho=0.0000001
+- optimizer=SAM
+- model_size=5
+- steps=2000000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=dmc_SAM-dynamics-value-error
+- exp_name=humanoid-run_rho0.0000001
+- enable_wandb=true
+- save_video=false
+- compile=false
+- eval_value=true
+- eval_q_ensemble_method=avg

@@ -1,0 +1,12 @@
+- task=humanoid-run
+- seed=42
+- optimizer=Adam
+- model_size=317
+- steps=4000000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=tdmpc2_model_size_ablation
+- exp_name=humanoid-run_model317M
+- enable_wandb=true
+- save_video=false
+- compile=false

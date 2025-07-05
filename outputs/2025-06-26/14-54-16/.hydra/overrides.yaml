@@ -1,0 +1,12 @@
+- task=dog-run
+- seed=789
+- optimizer=Adam
+- model_size=48
+- steps=4000000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=tdmpc2_model_size_ablation
+- exp_name=dog-run_model48M
+- enable_wandb=true
+- save_video=false
+- compile=false

@@ -1,0 +1,11 @@
+- task=dog-walk
+- seed=42
+- model_size=5
+- steps=1000
+- obs=state
+- base_dir=/tmp/test_fix
+- save_buff_after=500
+- test_buffer_ratio=0.1
+- enable_wandb=false
+- save_video=false
+- compile=false

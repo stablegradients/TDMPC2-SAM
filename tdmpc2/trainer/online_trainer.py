@@ -12,7 +12,9 @@ class OnlineTrainer(Trainer):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self._step = 0
+		self._test_step = 0
 		self._ep_idx = 0
+		self._test_ep_idx = 0
 		self._start_time = time()
 
 	def common_metrics(self):
@@ -45,6 +47,7 @@ class OnlineTrainer(Trainer):
 			ep_lengths.append(t)
 			if self.cfg.save_video:
 				self.logger.video.save(self._step)
+		# add checkpoint saving here for later
 		return dict(
 			episode_reward=np.nanmean(ep_rewards),
 			episode_success=np.nanmean(ep_successes),
@@ -71,57 +74,89 @@ class OnlineTrainer(Trainer):
 		batch_size=(1,))
 		return td
 
+	def do_train_stuff(self, train_metrics, done, eval_next, info=None, obs=None):
+		# Evaluate agent periodically
+		if self._step % self.cfg.eval_freq == 0:
+			eval_next = True
+
+		# Reset environment
+		if done:
+			if eval_next:
+				eval_metrics = self.eval()
+				eval_metrics.update(self.common_metrics())
+				self.logger.log(eval_metrics, 'eval')
+				# add buffer saving here for later
+				eval_next = False
+
+			if self._step > 0:
+				if info['terminated'] and not self.cfg.episodic:
+					raise ValueError('Termination detected but you are not in episodic mode. ' \
+					'Set `episodic=true` to enable support for terminations.')
+				train_metrics.update(
+					episode_reward=torch.tensor([td['reward'] for td in self._tds[1:]]).sum(),
+					episode_success=info['success'],
+					episode_length=len(self._tds),
+					episode_terminated=info['terminated'])
+				train_metrics.update(self.common_metrics())
+				self.logger.log(train_metrics, 'train')
+				self._ep_idx = self.buffer.add(torch.cat(self._tds))
+
+			obs = self.env.reset()
+			self._tds = [self.to_td(obs)]
+
+		# Collect experience
+		if self._step > self.cfg.seed_steps:
+			action = self.agent.act(obs, t0=len(self._tds)==1)
+		else:
+			action = self.env.rand_act()
+		obs, reward, done, info = self.env.step(action)
+		self._tds.append(self.to_td(obs, action, reward, info['terminated']))
+
+		# Update agent
+		if self._step >= self.cfg.seed_steps:
+			if self._step == self.cfg.seed_steps:
+				num_updates = self.cfg.seed_steps
+				print('Pretraining agent on seed data...')
+			else:
+				num_updates = 1
+			for _ in range(num_updates):
+				_train_metrics = self.agent.update(self.buffer)
+			train_metrics.update(_train_metrics)
+
+		self._step += 1
+		return train_metrics, done, eval_next, info, obs
+
+	def do_test_stuff(self, test_metrics, test_done, test_eval_next, test_info, test_obs):
+		"""Do the testing stuff."""
+		if self._test_step % self.cfg.eval_freq == 0:
+			test_eval_next = True
+		if test_done:
+			if test_eval_next:
+				# add buffer saving here for later
+				pass
+			if self._test_step > 0:
+				if test_info['terminated'] and not self.cfg.episodic:
+					raise ValueError('Termination detected but you are not in episodic mode. ' \
+					'Set `episodic=true` to enable support for terminations.')
+			test_obs = self.test_env.reset()
+			self._test_tds = [self.to_td(test_obs)]
+		if self._test_step > self.cfg.seed_steps:
+			test_action = self.agent.act(test_obs, t0=len(self._test_tds)==1)
+		else:
+			test_action = self.test_env.rand_act()
+		test_obs, reward, test_done, test_info = self.test_env.step(test_action)
+		self._test_tds.append(self.to_td(test_obs, test_action, reward, test_info['terminated']))
+		self._test_step += 1
+
+		return test_metrics, test_done, test_eval_next, test_info, test_obs
+
 	def train(self):
 		"""Train a TD-MPC2 agent."""
 		train_metrics, done, eval_next = {}, True, False
+		test_metrics, test_done, test_eval_next = {}, True, False
+		info, obs = None, None
+		test_info, test_obs = None, None
 		while self._step <= self.cfg.steps:
-			# Evaluate agent periodically
-			if self._step % self.cfg.eval_freq == 0:
-				eval_next = True
-
-			# Reset environment
-			if done:
-				if eval_next:
-					eval_metrics = self.eval()
-					eval_metrics.update(self.common_metrics())
-					self.logger.log(eval_metrics, 'eval')
-					eval_next = False
-
-				if self._step > 0:
-					if info['terminated'] and not self.cfg.episodic:
-						raise ValueError('Termination detected but you are not in episodic mode. ' \
-						'Set `episodic=true` to enable support for terminations.')
-					train_metrics.update(
-						episode_reward=torch.tensor([td['reward'] for td in self._tds[1:]]).sum(),
-						episode_success=info['success'],
-						episode_length=len(self._tds),
-						episode_terminated=info['terminated'])
-					train_metrics.update(self.common_metrics())
-					self.logger.log(train_metrics, 'train')
-					self._ep_idx = self.buffer.add(torch.cat(self._tds))
-
-				obs = self.env.reset()
-				self._tds = [self.to_td(obs)]
-
-			# Collect experience
-			if self._step > self.cfg.seed_steps:
-				action = self.agent.act(obs, t0=len(self._tds)==1)
-			else:
-				action = self.env.rand_act()
-			obs, reward, done, info = self.env.step(action)
-			self._tds.append(self.to_td(obs, action, reward, info['terminated']))
-
-			# Update agent
-			if self._step >= self.cfg.seed_steps:
-				if self._step == self.cfg.seed_steps:
-					num_updates = self.cfg.seed_steps
-					print('Pretraining agent on seed data...')
-				else:
-					num_updates = 1
-				for _ in range(num_updates):
-					_train_metrics = self.agent.update(self.buffer)
-				train_metrics.update(_train_metrics)
-
-			self._step += 1
-
+			train_metrics, done, eval_next, info, obs = self.do_train_stuff(train_metrics, done, eval_next, info, obs)
+			test_metrics, test_done, test_eval_next, test_info, test_obs = self.do_test_stuff(test_metrics, test_done, test_eval_next, test_info, test_obs)
 		self.logger.finish(self.agent)

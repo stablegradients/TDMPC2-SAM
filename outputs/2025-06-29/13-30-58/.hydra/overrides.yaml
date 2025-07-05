@@ -1,0 +1,13 @@
+- task=humanoid-run
+- seed=456
+- sam_rho=0.000001
+- optimizer=SAM
+- model_size=1
+- steps=2000000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=dmc_ablation_SAM_model_size
+- exp_name=humanoid-run_rho0.000001_model1
+- enable_wandb=true
+- save_video=false
+- compile=false

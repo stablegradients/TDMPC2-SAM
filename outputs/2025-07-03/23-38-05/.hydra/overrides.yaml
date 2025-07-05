@@ -1,0 +1,16 @@
+- task=dog-walk
+- seed=42
+- sam_rho=0.5
+- optimizer=SAM
+- model_size=5
+- steps=10000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=dmc_dual_buffer_ablation
+- exp_name=dog-walk_dual_buffer_rho0.5
+- checkpoint_dir=/zfsauton2/home/shrinivr/tdmpc2/buffer_logging
+- save_buff_after=1000
+- keep_last_n_checkpoints=10
+- enable_wandb=true
+- save_video=false
+- compile=false

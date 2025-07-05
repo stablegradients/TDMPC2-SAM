@@ -1,0 +1,15 @@
+- task=humanoid-run
+- seed=123
+- optimizer=Adam
+- model_size=5
+- steps=2000000
+- obs=state
+- wandb_entity=stablegradients
+- wandb_project=dmc_SAM-dynamics-value-error-original
+- exp_name=humanoid-run_Adam_ensemble_avg
+- enable_wandb=true
+- save_video=false
+- compile=false
+- eval_value=true
+- eval_q_ensemble_method=avg
+- eval_freq=10000
