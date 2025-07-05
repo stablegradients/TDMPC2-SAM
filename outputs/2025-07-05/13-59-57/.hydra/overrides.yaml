@@ -1,6 +1,0 @@
-- task=dog-walk
-- seed=42
-- steps=100000
-- exp_name=buffer_test
-- checkpoint_dir=./checkpoints
-- eval_freq=50000
