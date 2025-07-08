@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from tensordict.tensordict import TensorDict
 from trainer.base import Trainer
+import os
 
 
 class OnlineTrainer(Trainer):
@@ -85,7 +86,16 @@ class OnlineTrainer(Trainer):
 				eval_metrics = self.eval()
 				eval_metrics.update(self.common_metrics())
 				self.logger.log(eval_metrics, 'eval')
-				# add buffer saving here for later
+				# Save buffer and agent checkpoints
+				self.buffer.save(self.cfg.save_path, self._step, 'train')
+				
+				# Save agent checkpoint (model + optimizers)
+				agent_save_path = os.path.join(self.cfg.save_path, 'agent')
+				os.makedirs(agent_save_path, exist_ok=True)
+				agent_filename = os.path.join(agent_save_path, f"{self._step}.pt")
+				self.agent.save(agent_filename)
+				print(f"Agent checkpoint saved to {agent_filename}")
+				
 				eval_next = False
 
 			if self._step > 0:
@@ -132,8 +142,9 @@ class OnlineTrainer(Trainer):
 			test_eval_next = True
 		if test_done:
 			if test_eval_next:
-				# add buffer saving here for later
-				pass
+				# Save test buffer
+				self.test_buffer.save(self.cfg.save_path, self._test_step, 'test')
+				test_eval_next = False
 			if self._test_step > 0:
 				if test_info['terminated'] and not self.cfg.episodic:
 					raise ValueError('Termination detected but you are not in episodic mode. ' \

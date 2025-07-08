@@ -1,3 +1,4 @@
+import os
 import torch
 from tensordict.tensordict import TensorDict
 from torchrl.data.replay_buffers import ReplayBuffer, LazyTensorStorage
@@ -113,3 +114,55 @@ class Buffer():
 		"""Sample a batch of subsequences from the buffer."""
 		td = self._buffer.sample().view(-1, self.cfg.horizon+1).permute(1, 0)
 		return self._prepare_batch(td)
+
+	def save(self, path, steps, tag="train"):
+		"""Save the buffer to disk."""
+		# Create full path: path/tag/steps.pt
+		full_path = os.path.join(path, tag)
+		os.makedirs(full_path, exist_ok=True)
+		filename = os.path.join(full_path, f"{steps}.pt")
+		
+		# Extract and save buffer data
+		if hasattr(self, '_buffer') and self._num_eps > 0:
+			# Get all data from the buffer storage
+			all_data = []
+			for i in range(len(self._buffer)):
+				all_data.append(self._buffer[i])
+			
+			if all_data:
+				# Stack all transitions and organize by episodes
+				stacked_data = torch.stack(all_data)
+				# Group by episode ID
+				episode_ids = stacked_data['episode'].unique(sorted=True)
+				episode_list = []
+				
+				for ep_id in episode_ids:
+					episode_mask = stacked_data['episode'] == ep_id
+					episode_data = stacked_data[episode_mask]
+					episode_list.append(episode_data)
+				
+				# Stack episodes: shape [num_episodes, episode_length, ...]
+				buffer_data = torch.stack(episode_list)
+			else:
+				buffer_data = None
+		else:
+			buffer_data = None
+			
+		# Save buffer state
+		torch.save(buffer_data, filename)
+		print(f"Buffer saved to {filename} with {self._num_eps} episodes")
+		
+	def load_buffer_from_disk(self, path):
+		"""Load buffer state from disk."""
+		buffer_data = torch.load(path, map_location='cpu', weights_only=False)
+		
+		if buffer_data is not None:
+			# Reset buffer state
+			self._num_eps = 0
+			
+			# Load data using existing load method
+			self.load(buffer_data)
+			
+		print(f"Buffer loaded from {path} with {self._num_eps} episodes")
+		return self._num_eps
+		

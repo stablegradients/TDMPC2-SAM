@@ -5,7 +5,6 @@ from common import math
 from common.scale import RunningScale
 from common.world_model import WorldModel
 from common.layers import api_model_conversion
-from common.sam import SAM
 from tensordict import TensorDict
 
 
@@ -72,16 +71,36 @@ class TDMPC2(torch.nn.Module):
 		return min(max((frac-1)/(frac), self.cfg.discount_min), self.cfg.discount_max)
 
 	def save(self, fp):
-		torch.save({"model": self.model.state_dict()}, fp)
+		"""Save model and optimizer states."""
+		checkpoint = {
+			"model": self.model.state_dict(),
+			"optim": self.optim.state_dict(),
+			"pi_optim": self.pi_optim.state_dict(),
+			"scale": self.scale.state_dict() if hasattr(self.scale, 'state_dict') else None,
+		}
+		torch.save(checkpoint, fp)
 
 	def load(self, fp):
+		"""Load model and optimizer states."""
 		if isinstance(fp, dict):
 			state_dict = fp
 		else:
 			state_dict = torch.load(fp, map_location=torch.get_default_device(), weights_only=False)
-		state_dict = state_dict["model"] if "model" in state_dict else state_dict
-		state_dict = api_model_conversion(self.model.state_dict(), state_dict)
-		self.model.load_state_dict(state_dict)
+		
+		# Load model state
+		model_state = state_dict.get("model", state_dict)
+		model_state = api_model_conversion(self.model.state_dict(), model_state)
+		self.model.load_state_dict(model_state)
+		
+		# Load optimizer states if available
+		if "optim" in state_dict:
+			self.optim.load_state_dict(state_dict["optim"])
+		if "pi_optim" in state_dict:
+			self.pi_optim.load_state_dict(state_dict["pi_optim"])
+		if "scale" in state_dict and state_dict["scale"] is not None:
+			if hasattr(self.scale, 'load_state_dict'):
+				self.scale.load_state_dict(state_dict["scale"])
+		
 		return
 
 	@torch.no_grad()
