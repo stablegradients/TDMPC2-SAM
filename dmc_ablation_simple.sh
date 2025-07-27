@@ -8,47 +8,47 @@
 
 # Set your rho values for ablation (you can add multiple values)
 RHO_VALUES=(
-            0.001 
-            #0.0025 
-            #0.005 
-            #0.01 
-            #0.025 
-            #0.05 
-            
+            0.1
+            0.01
+            0.001
+            0.0001
             )
 # Example for multiple rho values:
 # RHO_VALUES=(0.1 0.3 0.5 0.7 0.9)
 
+# Set your horizon values for ablation
+HORIZON_VALUES=(3)
+
 # Set your wandb entity and project
 WANDB_ENTITY="stablegradients"
-WANDB_PROJECT="dmc_ablation"
+WANDB_PROJECT="dmc_ablation_SAM-policy"
 
 # Set model size (options: 1, 5, 19, 48, 317)
 MODEL_SIZE=5
 
 # Set number of training steps
-STEPS=2000000
+STEPS=1000000
 
 # Set observation type (state or rgb)
 OBS_TYPE="state"
 
 # Seeds to run
 SEEDS=(
-        42 
+        #42 
         123 
-        456 
-        789
+        #456 
+        #789
        )
 
 # ======================== DMC ENVIRONMENTS ========================
 # Comment out environments you don't want to run by adding # at the beginning
 
 DMC_ENVS=(
-    "dog-walk"
+    #"dog-walk"
     #"dog-run"
     #"dog-trot"
     #"humanoid-walk"
-    #"humanoid-run"
+    "humanoid-run"
     
     # Walker tasks
     # "walker-stand"
@@ -102,19 +102,21 @@ run_experiment() {
     local env=$1
     local seed=$2
     local rho=$3
-    local gpu_id=$4
-    local log_file=$5
+    local horizon=$4
+    local gpu_id=$5
+    local log_file=$6
     
-    echo "🚀 Starting: $env, seed=$seed, rho=$rho, GPU=$gpu_id"
+    echo "🚀 Starting: $env, seed=$seed, rho=$rho, horizon=$horizon, GPU=$gpu_id"
     
     # Create experiment name for grouping
-    exp_name="${env}_rho${rho}"
+    exp_name="${env}_rho${rho}_horizon${horizon}"
     
     # Run the experiment with GPU isolation
     CUDA_VISIBLE_DEVICES=$gpu_id python tdmpc2/train.py \
         task=$env \
         seed=$seed \
         sam_rho=$rho \
+        horizon=$horizon \
         optimizer=SAM \
         model_size=$MODEL_SIZE \
         steps=$STEPS \
@@ -128,9 +130,9 @@ run_experiment() {
     
     local exit_code=$?
     if [ $exit_code -eq 0 ]; then
-        echo "✅ Completed: $env, seed=$seed, rho=$rho, GPU=$gpu_id"
+        echo "✅ Completed: $env, seed=$seed, rho=$rho, horizon=$horizon, GPU=$gpu_id"
     else
-        echo "❌ Failed: $env, seed=$seed, rho=$rho, GPU=$gpu_id (exit code: $exit_code)"
+        echo "❌ Failed: $env, seed=$seed, rho=$rho, horizon=$horizon, GPU=$gpu_id (exit code: $exit_code)"
     fi
     
     return $exit_code
@@ -165,6 +167,7 @@ done
 # Print configuration
 echo "======================== CONFIGURATION ========================"
 echo "RHO VALUES: ${RHO_VALUES[@]}"
+echo "HORIZON VALUES: ${HORIZON_VALUES[@]}"
 echo "WANDB_ENTITY: $WANDB_ENTITY"
 echo "WANDB_PROJECT: $WANDB_PROJECT"
 echo "MODEL_SIZE: $MODEL_SIZE"
@@ -172,7 +175,7 @@ echo "STEPS: $STEPS"
 echo "OBS_TYPE: $OBS_TYPE"
 echo "SEEDS: ${SEEDS[@]}"
 echo "ENVIRONMENTS: ${#active_envs[@]} active environments"
-echo "TOTAL EXPERIMENTS: $((${#active_envs[@]} * ${#SEEDS[@]} * ${#RHO_VALUES[@]}))"
+echo "TOTAL EXPERIMENTS: $((${#active_envs[@]} * ${#SEEDS[@]} * ${#RHO_VALUES[@]} * ${#HORIZON_VALUES[@]}))"
 echo "PARALLEL JOBS: Up to $NUM_GPUS (number of GPUs)"
 echo "============================================================"
 
@@ -191,7 +194,9 @@ job_list=()
 for env in "${active_envs[@]}"; do
     for seed in "${SEEDS[@]}"; do
         for rho in "${RHO_VALUES[@]}"; do
-            job_list+=("$env:$seed:$rho")
+            for horizon in "${HORIZON_VALUES[@]}"; do
+                job_list+=("$env:$seed:$rho:$horizon")
+            done
         done
     done
 done
@@ -217,7 +222,7 @@ wait_for_job_completion() {
             exit_code=$?
             
             info=${job_info[$i]}
-            IFS=':' read -r env seed rho gpu_id <<< "$info"
+            IFS=':' read -r env seed rho horizon gpu_id <<< "$info"
             
             if [ $exit_code -eq 0 ]; then
                 ((completed_jobs++))
@@ -240,18 +245,18 @@ echo "Launching initial batch..."
 gpu_id=0
 while [ $job_index -lt $total_jobs ] && [ $gpu_id -lt $NUM_GPUS ]; do
     job=${job_list[$job_index]}
-    IFS=':' read -r env seed rho <<< "$job"
+    IFS=':' read -r env seed rho horizon <<< "$job"
     
-    log_file="results/dmc_ablation_multi_rho/${env}_seed${seed}_rho${rho}_gpu${gpu_id}.log"
+    log_file="results/dmc_ablation_multi_rho/${env}_seed${seed}_rho${rho}_horizon${horizon}_gpu${gpu_id}.log"
     
     # Launch job in background
-    run_experiment "$env" "$seed" "$rho" "$gpu_id" "$log_file" &
+    run_experiment "$env" "$seed" "$rho" "$horizon" "$gpu_id" "$log_file" &
     pid=$!
     
     job_pids+=($pid)
-    job_info+=("$env:$seed:$rho:$gpu_id")
+    job_info+=("$env:$seed:$rho:$horizon:$gpu_id")
     
-    echo "Launched job $((job_index + 1))/$total_jobs: $env, seed=$seed, rho=$rho on GPU $gpu_id (PID: $pid)"
+    echo "Launched job $((job_index + 1))/$total_jobs: $env, seed=$seed, rho=$rho, horizon=$horizon on GPU $gpu_id (PID: $pid)"
     
     ((job_index++))
     ((gpu_id++))
@@ -268,18 +273,18 @@ while [ $job_index -lt $total_jobs ]; do
     if [ $freed_gpu -ge 0 ]; then
         # Launch next job on freed GPU
         job=${job_list[$job_index]}
-        IFS=':' read -r env seed rho <<< "$job"
+        IFS=':' read -r env seed rho horizon <<< "$job"
         
-        log_file="results/dmc_ablation_multi_rho/${env}_seed${seed}_rho${rho}_gpu${freed_gpu}.log"
+        log_file="results/dmc_ablation_multi_rho/${env}_seed${seed}_rho${rho}_horizon${horizon}_gpu${freed_gpu}.log"
         
         # Launch job in background
-        run_experiment "$env" "$seed" "$rho" "$freed_gpu" "$log_file" &
+        run_experiment "$env" "$seed" "$rho" "$horizon" "$freed_gpu" "$log_file" &
         pid=$!
         
         job_pids+=($pid)
-        job_info+=("$env:$seed:$rho:$freed_gpu")
+        job_info+=("$env:$seed:$rho:$horizon:$freed_gpu")
         
-        echo "Launched job $((job_index + 1))/$total_jobs: $env, seed=$seed, rho=$rho on GPU $freed_gpu (PID: $pid)"
+        echo "Launched job $((job_index + 1))/$total_jobs: $env, seed=$seed, rho=$rho, horizon=$horizon on GPU $freed_gpu (PID: $pid)"
         ((job_index++))
     else
         sleep 2  # Wait a bit before checking again

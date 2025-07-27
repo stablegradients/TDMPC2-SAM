@@ -22,42 +22,33 @@ class TDMPC2(torch.nn.Module):
 		self.device = torch.device('cuda:0')
 		self.model = WorldModel(cfg).to(self.device)
 
-		# --- (FIX) SELECTIVE OPTIMIZER SETUP ---
-		# We separate the world model parameters into two groups:
-		# 1. Predictive components (encoder, dynamics) which benefit from SAM's regularization.
-		# 2. Supervisory heads (Q-funcs, reward) which need sharp Adam updates.
-		
-		# Parameters for the predictive model (encoder + dynamics)
-		predictive_model_params = [
+		# --- OPTIMIZER SETUP ---
+		# Collect all world model parameters
+		world_model_params = [
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr * self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
-			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
-		]
-
-		# Parameters for the supervisory heads (Q-functions, reward, termination)
-		head_params = [
 			{'params': self.model._reward.parameters()},
-			{'params': self.model._termination.parameters() if self.cfg.episodic else []},
 			{'params': self.model._Qs.parameters()}
 		]
+		
+		if self.cfg.multitask:
+			world_model_params.append({'params': self.model._task_emb.parameters()})
+		
+		if self.cfg.episodic:
+			world_model_params.append({'params': self.model._termination.parameters()})
 
+		# World model always uses Adam
+		self.model_optim = torch.optim.Adam(world_model_params, lr=self.cfg.lr, capturable=True)
+
+		# Policy optimizer - use SAM if specified, otherwise Adam
 		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
-			print(f'Using SAM optimizer for predictive model (rho={self.cfg.sam_rho}) and Adam for heads.')
+			print(f'Using SAM optimizer for policy (rho={self.cfg.sam_rho}) and Adam for world model.')
 			base_optimizer = torch.optim.Adam
-			# SAM for the predictive components
-			self.model_optim = SAM(predictive_model_params, base_optimizer, lr=self.cfg.lr, rho=self.cfg.sam_rho, capturable=True)
-			# Standard Adam for the heads
-			self.head_optim = torch.optim.Adam(head_params, lr=self.cfg.lr, capturable=True)
+			self.pi_optim = SAM([{'params': self.model._pi.parameters()}], base_optimizer, lr=self.cfg.lr, eps=1e-5, rho=self.cfg.sam_rho, capturable=True)
 		else:
-			print('Using Adam optimizer for all world model components.')
-			# If not using SAM, a single Adam optimizer for everything is fine.
-			world_model_params = predictive_model_params + head_params
-			self.model_optim = torch.optim.Adam(world_model_params, lr=self.cfg.lr, capturable=True)
-			self.head_optim = None # Not used
-
-		# Optimizer for the policy network remains separate
-		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
-		# --- END OF FIX ---
+			print('Using Adam optimizer for both world model and policy.')
+			self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
+		# --- END OF OPTIMIZER SETUP ---
 
 		self.model.eval()
 		self.scale = RunningScale(cfg)
@@ -180,17 +171,41 @@ class TDMPC2(torch.nn.Module):
 		return a.clamp(-1, 1)
 
 	def update_pi(self, zs, task):
-		action, info = self.model.pi(zs, task)
-		qs = self.model.Q(zs, action, task, return_type='avg', detach=True)
-		self.scale.update(qs[0])
-		qs = self.scale(qs)
+		# Use SAM if configured, otherwise standard Adam update
+		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
+			# First step of SAM
+			action, info = self.model.pi(zs, task)
+			qs = self.model.Q(zs, action, task, return_type='avg', detach=True)
+			self.scale.update(qs[0])
+			qs = self.scale(qs)
 
-		rho = torch.pow(self.cfg.rho, torch.arange(len(qs), device=self.device))
-		pi_loss = (-(self.cfg.entropy_coef * info["scaled_entropy"] + qs).mean(dim=(1,2)) * rho).mean()
-		pi_loss.backward()
-		pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
-		self.pi_optim.step()
-		self.pi_optim.zero_grad(set_to_none=True)
+			rho = torch.pow(self.cfg.rho, torch.arange(len(qs), device=self.device))
+			pi_loss = (-(self.cfg.entropy_coef * info["scaled_entropy"] + qs).mean(dim=(1,2)) * rho).mean()
+			pi_loss.backward()
+			self.pi_optim.first_step(zero_grad=True)
+			
+			# Second step of SAM - recompute loss at perturbed parameters
+			action, info = self.model.pi(zs, task)
+			qs = self.model.Q(zs, action, task, return_type='avg', detach=True)
+			qs = self.scale(qs)
+			
+			pi_loss = (-(self.cfg.entropy_coef * info["scaled_entropy"] + qs).mean(dim=(1,2)) * rho).mean()
+			pi_loss.backward()
+			pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
+			self.pi_optim.second_step(zero_grad=True)
+		else:
+			# Standard Adam update
+			action, info = self.model.pi(zs, task)
+			qs = self.model.Q(zs, action, task, return_type='avg', detach=True)
+			self.scale.update(qs[0])
+			qs = self.scale(qs)
+
+			rho = torch.pow(self.cfg.rho, torch.arange(len(qs), device=self.device))
+			pi_loss = (-(self.cfg.entropy_coef * info["scaled_entropy"] + qs).mean(dim=(1,2)) * rho).mean()
+			pi_loss.backward()
+			pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
+			self.pi_optim.step()
+			self.pi_optim.zero_grad(set_to_none=True)
 
 		info = TensorDict({
 			"pi_loss": pi_loss,
@@ -214,9 +229,8 @@ class TDMPC2(torch.nn.Module):
 
 		self.model.train()
 
-		# --- (FIX) LOSS CALCULATION AND GRADIENT APPLICATION ---
-		# This section is now generalized for both Adam and selective SAM.
-		# For SAM, this logic is called twice.
+		# --- LOSS CALCULATION AND GRADIENT APPLICATION ---
+		# World model uses standard Adam optimizer
 		def calculate_loss(zs, next_z_target):
 			# Predictions
 			_zs = zs[:-1]
@@ -268,41 +282,12 @@ class TDMPC2(torch.nn.Module):
 		for t in range(self.cfg.horizon):
 			zs[t+1] = self.model.next(zs[t], action[t], task)
 
-		# Calculate loss and update
-		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
-			# First step of SAM on predictive model
-			total_loss, losses = calculate_loss(zs.clone(), next_z.detach())
-			total_loss.backward()
-			self.model_optim.first_step(zero_grad=True)
-			
-			# Update heads with standard Adam
-			# Grads are already present from the first backward, so just step.
-			torch.nn.utils.clip_grad_norm_(self.model._reward.parameters(), self.cfg.grad_clip_norm)
-			torch.nn.utils.clip_grad_norm_(self.model._Qs.parameters(), self.cfg.grad_clip_norm)
-			if self.cfg.episodic:
-				torch.nn.utils.clip_grad_norm_(self.model._termination.parameters(), self.cfg.grad_clip_norm)
-			self.head_optim.step()
-			self.head_optim.zero_grad(set_to_none=True)
-
-			# Second step of SAM on predictive model
-			z_prime = self.model.encode(obs[0], task)
-			zs_prime = torch.empty_like(zs)
-			zs_prime[0] = z_prime
-			for t in range(self.cfg.horizon):
-				zs_prime[t+1] = self.model.next(zs_prime[t], action[t], task)
-			
-			total_loss_prime, _ = calculate_loss(zs_prime, next_z.detach())
-			total_loss_prime.backward()
-			grad_norm = torch.nn.utils.clip_grad_norm_(self.model._encoder.parameters(), self.cfg.grad_clip_norm)
-			grad_norm += torch.nn.utils.clip_grad_norm_(self.model._dynamics.parameters(), self.cfg.grad_clip_norm)
-			self.model_optim.second_step(zero_grad=True)
-
-		else: # Standard Adam
-			total_loss, losses = calculate_loss(zs.clone(), next_z.detach())
-			total_loss.backward()
-			grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
-			self.model_optim.step()
-			self.model_optim.zero_grad(set_to_none=True)
+		# Calculate loss and update - world model always uses Adam
+		total_loss, losses = calculate_loss(zs.clone(), next_z.detach())
+		total_loss.backward()
+		grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+		self.model_optim.step()
+		self.model_optim.zero_grad(set_to_none=True)
 
 		# Policy update
 		with torch.no_grad():
