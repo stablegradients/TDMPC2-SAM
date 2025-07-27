@@ -24,8 +24,8 @@ class TDMPC2(torch.nn.Module):
 
 		# --- (FIX) SELECTIVE OPTIMIZER SETUP ---
 		# We separate the world model parameters into two groups:
-		# 1. Predictive components (encoder, dynamics) which benefit from SAM's regularization.
-		# 2. Supervisory heads (Q-funcs, reward) which need sharp Adam updates.
+		# 1. Supervisory heads (Q-funcs, reward, termination) which benefit from SAM's regularization.
+		# 2. Predictive components (encoder, dynamics) which need standard Adam updates.
 		
 		# Parameters for the predictive model (encoder + dynamics)
 		predictive_model_params = [
@@ -42,12 +42,12 @@ class TDMPC2(torch.nn.Module):
 		]
 
 		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
-			print(f'Using SAM optimizer for predictive model (rho={self.cfg.sam_rho}) and Adam for heads.')
+			print(f'Using SAM optimizer for supervisory heads (rho={self.cfg.sam_rho}) and Adam for predictive model.')
 			base_optimizer = torch.optim.Adam
-			# SAM for the predictive components
-			self.model_optim = SAM(predictive_model_params, base_optimizer, lr=self.cfg.lr, rho=self.cfg.sam_rho, capturable=True)
-			# Standard Adam for the heads
-			self.head_optim = torch.optim.Adam(head_params, lr=self.cfg.lr, capturable=True)
+			# Standard Adam for the predictive components
+			self.model_optim = torch.optim.Adam(predictive_model_params, lr=self.cfg.lr, capturable=True)
+			# SAM for the supervisory heads
+			self.head_optim = SAM(head_params, base_optimizer, lr=self.cfg.lr, rho=self.cfg.sam_rho, capturable=True)
 		else:
 			print('Using Adam optimizer for all world model components.')
 			# If not using SAM, a single Adam optimizer for everything is fine.
@@ -270,32 +270,34 @@ class TDMPC2(torch.nn.Module):
 
 		# Calculate loss and update
 		if hasattr(self.cfg, 'optimizer') and self.cfg.optimizer == 'SAM':
-			# First step of SAM on predictive model
+			# First step of SAM on supervisory heads
 			total_loss, losses = calculate_loss(zs.clone(), next_z.detach())
 			total_loss.backward()
-			self.model_optim.first_step(zero_grad=True)
+			self.head_optim.first_step(zero_grad=True)
 			
-			# Update heads with standard Adam
+			# Update predictive model with standard Adam
 			# Grads are already present from the first backward, so just step.
-			torch.nn.utils.clip_grad_norm_(self.model._reward.parameters(), self.cfg.grad_clip_norm)
-			torch.nn.utils.clip_grad_norm_(self.model._Qs.parameters(), self.cfg.grad_clip_norm)
-			if self.cfg.episodic:
-				torch.nn.utils.clip_grad_norm_(self.model._termination.parameters(), self.cfg.grad_clip_norm)
-			self.head_optim.step()
-			self.head_optim.zero_grad(set_to_none=True)
+			grad_norm = torch.nn.utils.clip_grad_norm_(self.model._encoder.parameters(), self.cfg.grad_clip_norm)
+			grad_norm += torch.nn.utils.clip_grad_norm_(self.model._dynamics.parameters(), self.cfg.grad_clip_norm)
+			if self.cfg.multitask:
+				grad_norm += torch.nn.utils.clip_grad_norm_(self.model._task_emb.parameters(), self.cfg.grad_clip_norm)
+			self.model_optim.step()
+			self.model_optim.zero_grad(set_to_none=True)
 
-			# Second step of SAM on predictive model
+			# Second step of SAM on supervisory heads
 			z_prime = self.model.encode(obs[0], task)
 			zs_prime = torch.empty_like(zs)
 			zs_prime[0] = z_prime
 			for t in range(self.cfg.horizon):
 				zs_prime[t+1] = self.model.next(zs_prime[t], action[t], task)
-			
+
 			total_loss_prime, _ = calculate_loss(zs_prime, next_z.detach())
 			total_loss_prime.backward()
-			grad_norm = torch.nn.utils.clip_grad_norm_(self.model._encoder.parameters(), self.cfg.grad_clip_norm)
-			grad_norm += torch.nn.utils.clip_grad_norm_(self.model._dynamics.parameters(), self.cfg.grad_clip_norm)
-			self.model_optim.second_step(zero_grad=True)
+			torch.nn.utils.clip_grad_norm_(self.model._reward.parameters(), self.cfg.grad_clip_norm)
+			torch.nn.utils.clip_grad_norm_(self.model._Qs.parameters(), self.cfg.grad_clip_norm)
+			if self.cfg.episodic:
+				torch.nn.utils.clip_grad_norm_(self.model._termination.parameters(), self.cfg.grad_clip_norm)
+			self.head_optim.second_step(zero_grad=True)
 
 		else: # Standard Adam
 			total_loss, losses = calculate_loss(zs.clone(), next_z.detach())

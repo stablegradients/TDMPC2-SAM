@@ -8,26 +8,25 @@
 
 # Set your rho values for ablation (you can add multiple values)
 RHO_VALUES=(
-            0.001 
-            #0.0025 
-            #0.005 
-            #0.01 
-            #0.025 
-            #0.05 
-            
+            # 0.1
+            # 0.01
+            # 0.001
+            #0.0001
+            #  0.00001
+            0.000001
             )
 # Example for multiple rho values:
 # RHO_VALUES=(0.1 0.3 0.5 0.7 0.9)
 
 # Set your wandb entity and project
 WANDB_ENTITY="stablegradients"
-WANDB_PROJECT="dmc_ablation"
+WANDB_PROJECT="dmc_ablation_value_sam"
 
 # Set model size (options: 1, 5, 19, 48, 317)
 MODEL_SIZE=5
 
 # Set number of training steps
-STEPS=2000000
+STEPS=1000000
 
 # Set observation type (state or rgb)
 OBS_TYPE="state"
@@ -44,11 +43,11 @@ SEEDS=(
 # Comment out environments you don't want to run by adding # at the beginning
 
 DMC_ENVS=(
-    "dog-walk"
+    #"dog-walk"
     #"dog-run"
     #"dog-trot"
     #"humanoid-walk"
-    #"humanoid-run"
+    "humanoid-run"
     
     # Walker tasks
     # "walker-stand"
